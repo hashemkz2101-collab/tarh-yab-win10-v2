@@ -33,7 +33,7 @@ jobs:
         run: |
           $pth = Get-ChildItem "dist/$env:PKG/python" -Filter "python*._pth" | Select-Object -First 1
           $zip = Get-ChildItem "dist/$env:PKG/python" -Filter "python*.zip" | Select-Object -First 1
-          @($zip.Name, ".", "Lib\site-packages", "import site") | Set-Content $pth.FullName -Encoding ascii
+          @($zip.Name, ".", "..", "Lib\site-packages", "import site") | Set-Content $pth.FullName -Encoding ascii
           Get-Content $pth.FullName
 
       - name: Install pip
