@@ -1,0 +1,112 @@
+name: Build Windows portable package
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PY_VERSION: "3.12.8"
+  PKG: TarhYab
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download embeddable Python
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/$env:PKG/python" | Out-Null
+          $url = "https://www.python.org/ftp/python/$env:PY_VERSION/python-$env:PY_VERSION-embed-amd64.zip"
+          Invoke-WebRequest $url -OutFile py.zip
+          Expand-Archive py.zip -DestinationPath "dist/$env:PKG/python" -Force
+
+      - name: Enable site-packages in embedded Python
+        run: |
+          $pth = Get-ChildItem "dist/$env:PKG/python" -Filter "python*._pth" | Select-Object -First 1
+          $zip = Get-ChildItem "dist/$env:PKG/python" -Filter "python*.zip" | Select-Object -First 1
+          @($zip.Name, ".", "Lib\site-packages", "import site") | Set-Content $pth.FullName -Encoding ascii
+          Get-Content $pth.FullName
+
+      - name: Install pip
+        run: |
+          Invoke-WebRequest https://bootstrap.pypa.io/get-pip.py -OutFile get-pip.py
+          & "dist/$env:PKG/python/python.exe" get-pip.py --no-warn-script-location
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Install dependencies (CPU torch)
+        run: |
+          $py = "dist/$env:PKG/python/python.exe"
+          & $py -m pip install --no-warn-script-location torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          if ($LASTEXITCODE) { exit 1 }
+          & $py -m pip install --no-warn-script-location -r requirements.txt
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Copy application files
+        run: |
+          $d = "dist/$env:PKG"
+          Copy-Item *.py $d
+          Copy-Item README.txt, requirements.txt, allow-network.bat $d
+          New-Item -ItemType Directory -Force -Path "$d/.streamlit" | Out-Null
+          if (Test-Path .streamlit/config.toml) {
+            Copy-Item .streamlit/config.toml "$d/.streamlit/"
+          } else {
+            @'
+          [server]
+          maxUploadSize = 100
+
+          [browser]
+          gatherUsageStats = false
+
+          [theme]
+          primaryColor = "#1f3a8a"
+          backgroundColor = "#ffffff"
+          secondaryBackgroundColor = "#f1f3f7"
+          textColor = "#1b1d22"
+          '@ -replace '(?m)^ {10}', '' | Set-Content "$d/.streamlit/config.toml" -Encoding ascii
+          }
+          New-Item -ItemType Directory -Force -Path "$d/library" | Out-Null
+          @'
+          @echo off
+          cd /d "%~dp0"
+          echo Your IP addresses (use one of them from another PC, e.g. http://IP:8501):
+          ipconfig | findstr /i "IPv4"
+          python\python.exe -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+          pause
+          '@ -replace '(?m)^ {10}', '' | Set-Content "$d/run.bat" -Encoding ascii
+
+      - name: Download models into the package
+        working-directory: dist/TarhYab
+        run: |
+          & python\python.exe download_model.py
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Smoke test
+        working-directory: dist/TarhYab
+        run: |
+          & python\python.exe -c "import torch, torchvision, transformers, cv2, numpy, PIL, streamlit, streamlit_cropper, core; print('imports ok', torch.__version__, streamlit.__version__)"
+          if ($LASTEXITCODE) { exit 1 }
+          if (-not (Test-Path model_dinov2_small/model.safetensors)) { throw "small model missing" }
+
+      - name: Zip package
+        run: 7z a -tzip -mx=3 TarhYab-windows-portable.zip "./dist/$env:PKG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TarhYab-windows-portable
+          path: TarhYab-windows-portable.zip
+          compression-level: 0
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TarhYab-windows-portable.zip
